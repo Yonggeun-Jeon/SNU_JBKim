@@ -1,0 +1,1338 @@
+# Load libraries
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(harmony)
+library(CellChat)
+library(ComplexHeatmap)
+library(monocle3)
+library(patchwork)
+library(scDblFinder)
+library(tidyr)
+library(tidyverse)
+library(plotly)
+library(svglite)
+library(officer)
+library(scales)
+
+# ----------------------------------------
+# Functions
+# ----------------------------------------
+
+run_preprocessing <- function(seurat_object, filename) {
+  seurat_object <- NormalizeData(seurat_object)
+  seurat_object <- FindVariableFeatures(seurat_object)
+  seurat_object <- ScaleData(seurat_object)
+  seurat_object <- RunPCA(seurat_object)
+  seurat_object <- FindNeighbors(seurat_object, dims = 1:30)
+  seurat_object <- FindClusters(seurat_object, resolution = 0.8)
+  seurat_object <- RunUMAP(seurat_object, dims = 1:30)
+  saveRDS(seurat_object, filename)
+  cat("Preprocessing completed. Seurat object saved to", filename, "\n")
+}
+
+cellcycle <- list()
+cellcycle$s.genes <- c("Mcm5","Pcna","Tyms","Fen1","Mcm2","Mcm4","Rrm1",
+                       "Ung","Gins2","Mcm6","Cdca7","Dtl","Prim1","Uhrf1","Cenpu","Hells",
+                       "Rfc2","Rpa2","Nasp","Rad51ap1","Gmnn","Wdr76","Slbp","Ccne2","Ubr7",
+                       "Pold3","Msh2","Atad2","Rad51","Rrm2","Cdc45","Cdc6","Exo1","Tipin",
+                       "Dscc1","Blm","Casp8ap2","Usp1","Clspn","Pola1","Chaf1b","Brip1","E2f8")
+cellcycle$g2m.genes <- c("Hmgb2","Cdk1","Nusap1","Ube2c","Birc5","Tpx2",
+                         "Top2a","Ndc80","Cks2","Nuf2","Cks1b","Mki67","Tmpo","Cenpf","Tacc3", 
+                         "Pimreg","Smc4","Ccnb2","Ckap2l","Ckap2","Aurkb","Bub1","Kif11", 
+                         "Anp32e","Tubb4b","Gtse1","Kif20b","Hjurp","Cdca3","Jpt1","Cdc20","Ttk",
+                         "Cdc25c","Kif2c","Rangap1","Ncapd2","Dlgap5","Cdca2","Cdca8","Ect2",
+                         "Kif23","Hmmr","Aurka","Psrc1","Anln","Lbr","Ckap5","Cenpe","Ctcf",
+                         "Nek2","G2e3","Gas2l3","Cbx5","Cenpa")
+Seurat_object <- CellCycleScoring(Seurat_object, s.features = cellcycle$s.genes, 
+                                  g2m.features = cellcycle$g2m.genes)
+
+annotation_3 <- function(object, annotation_values) {
+  names(annotation_values) <- levels(object)
+  object <- RenameIdents(object, annotation_values)
+  Idents(object) <- object$seurat_clusters
+  object@meta.data$annotation_3 <- object@active.ident
+  object$annotation_3 <- as.character(object$annotation_3)
+  return(object)
+}
+
+calculate_cluster_10_ratio <- function(seurat_object) {
+  cluster_10_counts <- seurat_object@meta.data$seurat_clusters == 10
+  cluster_10_ratio <- sum(cluster_10_counts) / length(cluster_10_counts)
+  return(cluster_10_ratio)
+}
+
+
+# --------------------------------- #
+# Pre-processing (WT-1 ~ KO-3)
+# --------------------------------- #
+
+group1.data <- Read10X(data.dir = "~/filtered_feature_bc_matrix/") 
+group1 <- CreateSeuratObject(counts = group1.data, project = "JBU", min.cells = 3, min.features = 200) 
+group1[["percent.mt"]] <- PercentageFeatureSet(group1, pattern = "^mt-") 
+VlnPlot(group1, features = c("nFeature_RNA"), group.by = "sample", pt.size = 0)
+VlnPlot(group1, features = c("nCount_RNA"), group.by = "sample", pt.size = 0)
+VlnPlot(group1, features = c("percent.mt"), group.by = "sample", pt.size = 0)
+group1 <- subset(group1, subset = nFeature_RNA > 200 & nCount_RNA < 100000 & percent.mt < 20) 
+
+group1 <- NormalizeData(group1) 
+group1 <- FindVariableFeatures(group1)
+group1 <- ScaleData(group1) 
+group1 <- RunPCA(group1) 
+VizDimLoadings(group1)
+DimHeatmap(group1, dims = 1:20)
+ElbowPlot(group1, ndims = 40)
+group1 <- FindNeighbors(group1, dims = 1:30) 
+group1 <- FindClusters(group1, resolution = 0.8)
+group1 <- RunTSNE(group1, dims = 1:30)
+DimPlot(group1, reduction = "tsne", group.by = "sample")
+group1 <- RunUMAP(group1, dims = 1:30) 
+DimPlot(group1, reduction = "umap", split.by = "sample") 
+DimPlot(group1, reduction = "umap", label = T)
+saveRDS(group1, "group1.rds")
+
+# metadata sample
+group1$sample <- sapply(colnames(group1), function(x) {
+  if (endsWith(x, "-1")) {
+    "KO-1"
+  } else if (endsWith(x, "-2")) {
+    "KO-2"
+  } else if (endsWith(x, "-3")) {
+    "KO-3"
+  } else if (endsWith(x, "-4")) {
+    "WT-1"
+  } else if (endsWith(x, "-5")) {
+    "WT-2"
+  } else if (endsWith(x, "-6")) {
+    "WT-3"
+  } else {
+    NA
+  }
+})
+
+group1$genotype <- sapply(group1$sample, function(x) {
+  if (grepl("KO", x)) {
+    "KO"
+  } else if (grepl("WT", x)) {
+    "WT"
+  } else {
+    NA
+  }
+})
+
+# Pre-processing checking
+group1$sample <- factor(group1$sample, levels = c("WT-1", "WT-2", "WT-3", "KO-1", "KO-2", "KO-3"))
+group1$genotype <- factor(group1$genotype, levels = c("WT", "KO"))
+DimPlot(group1, split.by = "sample")
+DimPlot(group1, split.by = "genotype")
+FeaturePlot(group1, "nFeature_RNA") 
+FeaturePlot(group1, "nCount_RNA") 
+FeaturePlot(group1, "Cma1") # Mast cell marker
+FeaturePlot(group1, "Sirt6", split.by = "genotype") 
+FeaturePlot(group1, "Il7r") # T cell marker
+FeaturePlot(group1, "Themis") # T cell marker
+FeaturePlot(group1, "Pax5") # B cell marker
+FeaturePlot(group1, "Ms4a1") # B cell marker
+FeaturePlot(group1, "Cd14") # Monocyte marker
+FeaturePlot(group1, "Gzmb") # NK marker
+FeaturePlot(group1, "Flt3") # DC marker
+FeaturePlot(group1, "Ppbp") # Platelet marker     
+FeaturePlot(group1, "Pi16") # MSC marker     
+FeaturePlot(group1, "Pdgfra") # ASPC marker     
+FeaturePlot(group1, "Cyyr1") # EC marker     
+FeaturePlot(group1, "Ptprc") # Immune marker     
+FeaturePlot(group1, "Mrc1") # Mac marker     
+FeaturePlot(group1, "Klra2") # Mono marker     
+FeaturePlot(group1, "Flt3") # DC marker     
+FeaturePlot(group1, "Msln") # Mesothelial marker     
+FeaturePlot(group1, "Plin1") # Adipocyte marker     
+FeaturePlot(group1, "Hbb-bs") # RBC marker     
+FeaturePlot(group1, "Cox8c") # Sperm marker     
+FeaturePlot(group1, "Fabp9") # Sperm marker     
+
+# --------------------------------- #
+# Exclude WT-1 ==> group2
+# --------------------------------- #
+
+# WT-1: Sperm contamination
+ave <- AverageExpression(group1)
+write.csv(ave, "Cluster_average.csv")
+WT1 <- FindMarkers(group1, group.by = "sample", ident.1 = "WT-1")
+write.csv(WT1, "WT-1_DEG.csv")
+group2 <- subset(group1[,group1$sample %in% c("WT-2", "WT-3", "KO-1", "KO-2", "KO-3")])
+
+# --------------------------------- #
+# group2 processing
+# --------------------------------- #
+
+DimPlot(group2)
+group2 <- NormalizeData(group2) 
+group2 <- FindVariableFeatures(group2)
+group2 <- ScaleData(group2) 
+group2 <- RunPCA(group2)
+group2 <- FindNeighbors(group2, dims = 1:30)
+group2 <- FindClusters(group2, resolution = 0.8) 
+group2 <- RunUMAP(group2, dims = 1:30) 
+DimPlot(group2, reduction = "umap", label = T) 
+DimPlot(group2, split.by = "sample") 
+DimPlot(group2, group.by = "sample") 
+DimPlot(group2, group.by = "genotype") 
+saveRDS(group2, "group2.rds")
+
+FeaturePlot(group2, "Fabp9") # Sperm marker  
+FeaturePlot(group2, "Cox8c") # Sperm marker  
+FeaturePlot(group2, "Rhoj")
+FeaturePlot(group2, "Pdgfra")
+FeaturePlot(group2, "Pi16")
+FeaturePlot(group2, "Ms4a1")
+FeaturePlot(group2, "Themis")
+FeaturePlot(group2, "Il7r")
+FeaturePlot(group2, "Gzma")
+FeaturePlot(group2, "Flt3")
+FeaturePlot(group2, "Klra2")
+FeaturePlot(group2, "Mrc1")
+FeaturePlot(group2, "Adgre1")
+FeaturePlot(group2, "Gpnmb")
+FeaturePlot(group2, "Msln")
+FeaturePlot(group2, "Hbb-bs")
+FeaturePlot(group2, "Hba-a1")
+FeaturePlot(group2, "Hba-a2")
+FeaturePlot(group2, "Cma1") # Mast cell marker
+FeaturePlot(group2, "Cyyr1") 
+FeaturePlot(group2, "Cdh5") 
+FeaturePlot(group2, "Acta2")
+FeaturePlot(group2, "Myh11") 
+FeaturePlot(group2, "Cdh5") 
+group2 <- CellCycleScoring(group2, s.features = cellcycle$s.genes, g2m.features = cellcycle$g2m.genes)
+FeaturePlot(group2, "S.Score") 
+FeaturePlot(group2, "G2M.Score") 
+DimPlot(group2, group.by = "Phase") 
+
+# Find Doublet
+BiocManager::install("scDblFinder")
+set.seed(123)
+Idents(group2) <- group2@meta.data$sample
+group2_doublets <- scDblFinder(GetAssayData(group2, slot = "counts"), samples = group2@meta.data$sample)
+group2$scDblFinder.score <- group2_doublets$scDblFinder.score
+group2$scDblFinder.class <- group2_doublets$scDblFinder.class
+FeaturePlot(group2, "scDblFinder.score", pt.size = 0.1, split.by = "genotype") 
+DimPlot(group2, group.by = "scDblFinder.class", split.by = "genotype")
+FeaturePlot(group2, "scDblFinder.score", pt.size = 0.1) 
+FeaturePlot(group2, "Sparc", pt.size = 0.1, split.by = "genotype") 
+
+# group2 Annotation_1: stromal & immune
+Idents(group2) <- group2@meta.data$seurat_clusters
+DimPlot(group2, label = T)
+DimPlot(group2, label = T)
+FeaturePlot(group2, "Rhoj")
+FeaturePlot(group2, "Ptprc")
+stromal <- subset(group2[,group2$seurat_clusters %in% c(0, 1, 2, 3, 4, 5, 6, 15, 17, 20, 23, 25)])
+immune <- subset(group2[,group2$seurat_clusters %in% c(7, 8, 9, 10, 11, 12, 13, 14, 16, 18, 19, 21, 22, 24, 26, 27)])
+
+stromal <- NormalizeData(stromal) 
+stromal <- FindVariableFeatures(stromal) 
+stromal <- ScaleData(stromal) 
+stromal <- RunPCA(stromal) 
+stromal <- FindNeighbors(stromal, dims = 1:30)
+stromal <- FindClusters(stromal, resolution = 1.2) 
+stromal <- RunUMAP(stromal, dims = 1:30) 
+DimPlot(stromal, reduction = "umap", group.by = "genotype") 
+DimPlot(stromal, reduction = "umap", label = T) 
+saveRDS(stromal, "stromal.rds")
+
+immune <- NormalizeData(immune) 
+immune <- FindVariableFeatures(immune) 
+immune <- ScaleData(immune) 
+immune <- RunPCA(immune) 
+immune <- FindNeighbors(immune, dims = 1:30)
+immune <- FindClusters(immune, resolution = 1.2) 
+immune <- RunUMAP(immune, dims = 1:30) 
+DimPlot(immune, reduction = "umap", group.by = "genotype") 
+DimPlot(immune, reduction = "umap", label = T) 
+saveRDS(immune, "immune.rds")
+
+stromal$annotation_1 <- "stromal"
+immune$annotation_1 <- "immune"
+group2[["annotation_1"]] <- c(stromal$annotation_1, immune$annotation_1)
+DimPlot(group2, group.by = "annotation_1")
+
+# stromal annotation
+DimPlot(stromal, group.by = "scDblFinder.class")
+FeaturePlot(stromal, "Pdgfra")
+FeaturePlot(stromal, "Ptprc")
+FeaturePlot(stromal, "Scara5")
+FeaturePlot(stromal, "Cdh5")
+FeaturePlot(stromal, "Cyyr1")
+FeaturePlot(stromal, "Trpc6")
+FeaturePlot(stromal, "Acta2")
+FeaturePlot(stromal, "Myh11")
+FeaturePlot(stromal, "Msln")
+FeaturePlot(stromal, "Pi16")
+FeaturePlot(stromal, "Icam1")
+FeaturePlot(stromal, "Sdc1")
+FeaturePlot(stromal, "Col8a1")
+FeaturePlot(stromal, "Kcna1")
+FeaturePlot(stromal, "Pcdh15")
+FeaturePlot(stromal, "Tagln")
+FeaturePlot(stromal, "Hbb-bs")
+FeaturePlot(stromal, "Bst2")
+FeaturePlot(stromal, "Ifit1")
+FeaturePlot(stromal, "Wt1")
+stromal_marker <- FindAllMarkers(stromal)
+write.csv(stromal_marker, "stromal_marker.csv")
+
+# stromal Annotation_2: ASPC, Meso, Endo/SMC, RBC, Doublet
+ASPC <- subset(stromal[,stromal$seurat_clusters %in% c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 15, 16, 18, 21, 26)])
+Mesothelial <- subset(stromal[,stromal$seurat_clusters %in% c(10, 13, 14, 17)])
+Endo_SMC <- subset(stromal[,stromal$seurat_clusters %in% c(22)])
+RBC <- subset(stromal[,stromal$seurat_clusters %in% c(20, 23)])
+Doublet <- subset(stromal[,stromal$seurat_clusters %in% c(19, 24, 25)])
+ASPC$annotation_2 <- "ASPC"
+Mesothelial$annotation_2 <- "Mesothelial"
+Endo_SMC$annotation_2 <- "Endo_SMC"
+RBC$annotation_2 <- "RBC"
+Doublet$annotation_2 <- "Doublet"
+stromal[["annotation_2"]] <- c(ASPC$annotation_2, Mesothelial$annotation_2, Endo_SMC$annotation_2, 
+                               RBC$annotation_2, Doublet$annotation_2)
+DimPlot(stromal, group.by = "annotation_2")
+run_preprocessing(ASPC, "ASPC.rds")
+run_preprocessing(Mesothelial, "Mesothelial.rds")
+run_preprocessing(Endo_SMC, "Endo_SMC.rds")
+run_preprocessing(RBC, "RBC.rds")
+run_preprocessing(Doublet, "Doublet_stromal.rds")
+saveRDS(Mesothelial, "Mesothelial.rds")
+saveRDS(Endo_SMC, "Endo_SMC.rds")
+
+# ASPC Annotation_3: ASC, PreAd, Low_quality, Doublet, IFN-stimulated, SMC_like, Epithelial
+DimPlot(ASPC, label = T)
+DimPlot(ASPC, group.by = "genotype")
+VlnPlot(ASPC, "nCount_RNA")
+DimPlot(ASPC, group.by = "scDblFinder.class")
+FeaturePlot(ASPC, "nCount_RNA")
+FeaturePlot(ASPC, "Dpp4")
+VlnPlot(ASPC, "Dpp4")
+FeaturePlot(ASPC, "Icam1")
+FeaturePlot(ASPC, "Rpl37")
+FeaturePlot(ASPC, "Isg15")
+FeaturePlot(ASPC, "Acta2")
+FeaturePlot(ASPC, "Pdgfra")
+ASPC_marker <- FindAllMarkers(ASPC)
+subcluster <- c("PreAd","PreAd","PreAd","PreAd","PreAd","PreAd","PreAd","PreAd","PreAd","Low_quality","ASC","PreAd","Doublet","ASC","PreAd","IFN-stimulated","SMC_like","Epithelial")
+ASPC <- annotation_3(ASPC, subcluster)
+write.csv(ASPC_marker, "ASPC_marker.csv")
+ASPC_doublets <- scDblFinder(GetAssayData(ASPC, slot = "counts"), samples = ASPC@meta.data$sample)
+ASPC$scDblFinder.score2 <- ASPC_doublets$scDblFinder.score
+ASPC$scDblFinder.class2 <- ASPC_doublets$scDblFinder.class
+FeaturePlot(ASPC, "scDblFinder.score") 
+VlnPlot(ASPC, "scDblFinder.score") 
+VlnPlot(ASPC, "Dpp4", split.by = "scDblFinder.class") 
+DimPlot(ASPC, group.by = "scDblFinder.class")
+annotation_3 <- c("PreAd","PreAd","PreAd","PreAd","PreAd","PreAd","PreAd","PreAd","PreAd","Low_quality","ASC","PreAd","ASC","ASC","PreAd","IFN-stimulated","SMC_like","Epithelial")
+Idents(ASPC) <- ASPC$seurat_clusters
+names(annotation_3) <- levels(ASPC)
+ASPC <- RenameIdents(ASPC, annotation_3)
+ASPC@meta.data$annotation_3 <- ASPC@active.ident
+ASPC$annotation_3 <- as.character(ASPC$annotation_3)
+
+s_score <- group2$S.Score
+g2m_score <- group2$G2M.Score
+Phase <- group2$Phase
+ASPC$S.Score <- s_score
+ASPC$G2M.Score <- g2m_score
+ASPC$Phase <- Phase
+DimPlot(ASPC, label = T)
+saveRDS(ASPC, "ASPC.rds")
+
+# Mesothelial Annotation_3: "Mes1", "Mes2", "Doublet", "Low_quality"
+DimPlot(Mesothelial, label = T)
+DimPlot(Mesothelial, group.by = "genotype")
+DimPlot(Mesothelial, group.by = "scDblFinder.class")
+Meso_marker <- FindAllMarkers(Mesothelial)
+write.csv(Meso_marker, "Mesothelial_marker.csv")
+VlnPlot(Mesothelial, "Krt19")
+VlnPlot(Mesothelial, "nCount_RNA")
+Mesothelial <- FindClusters(Mesothelial, resolution = 0.2) 
+subcluster_meso <- c("Mes1", "Mes2", "Doublet", "Low_quality")
+Mesothelial <- annotation_3(Mesothelial, subcluster_meso)
+
+# Endo_SMC Annotation_3: "SMC","Endothelial","Endothelial","Low_quality","LEC","Low_quality","SMC"
+DimPlot(Endo_SMC, label = T)
+DimPlot(Endo_SMC, group.by = "genotype")
+DimPlot(Endo_SMC, group.by = "scDblFinder.class")
+Endo_SMC_marker <- FindAllMarkers(Endo_SMC)
+write.csv(Endo_SMC_marker, "Endo_SMC_marker.csv")
+VlnPlot(Endo_SMC, "nCount_RNA")
+VlnPlot(Endo_SMC, "Lepr")
+VlnPlot(Endo_SMC, "Vegfc")
+VlnPlot(Endo_SMC, "Cdh5")
+VlnPlot(Endo_SMC, "Kdr")
+VlnPlot(Endo_SMC, "Myh11")
+VlnPlot(Endo_SMC, "Acta2")
+FeaturePlot(Endo_SMC, "Myh11")
+FeaturePlot(Endo_SMC, "Acta2")
+FeaturePlot(Endo_SMC, "Tagln")
+FeaturePlot(Endo_SMC, "Cyyr1")
+FeaturePlot(Endo_SMC, "Cdh5")
+FeaturePlot(Endo_SMC, "Pecam1")
+subcluster_endo <- c("SMC","Endothelial","Endothelial","Low_quality","LEC","Low_quality","SMC")
+Endo_SMC <- annotation_3(Endo_SMC, subcluster_endo)
+
+# Finalize stromal annotation_3 
+DimPlot(stromal, group.by = "annotation_2")
+RBC$annotation_3 <- "RBC"
+Doublet$annotation_3 <- "Doublet"
+stromal[["annotation_3"]] <- c(ASPC$annotation_3, Mesothelial$annotation_3, Endo_SMC$annotation_3, 
+                               RBC$annotation_3, Doublet$annotation_3)
+DimPlot(stromal, group.by = "annotation_3")
+DimPlot(stromal, group.by = "scDblFinder.class")
+
+# immune annotation
+DimPlot(immune, group.by = "scDblFinder.class")
+FeaturePlot(immune, "nCount_RNA")
+FeaturePlot(immune, "Pdgfra")
+FeaturePlot(immune, "Ptprc")
+FeaturePlot(immune, "Ms4a1")
+FeaturePlot(immune, "Themis")
+FeaturePlot(immune, "Il7r")
+FeaturePlot(immune, "Gzma")
+FeaturePlot(immune, "Flt3")
+FeaturePlot(immune, "Klra2")
+FeaturePlot(immune, "Mrc1")
+FeaturePlot(immune, "Cma1") # Mast cell marker
+FeaturePlot(immune, "Hbb-bs") # RBC marker 
+FeaturePlot(immune, "Cd3e")  
+FeaturePlot(immune, "Trem2") 
+FeaturePlot(immune, "Sell") # Cd62L Naive T cell
+FeaturePlot(immune, "Ccr7") # Naive T cell 
+FeaturePlot(immune, "Il2ra") # CD25 T cell 
+FeaturePlot(immune, "Cd44") # activation marker
+FeaturePlot(immune, "Cd69") 
+FeaturePlot(immune, "Ifng") # Th1
+FeaturePlot(immune, "Il4") # Th2
+FeaturePlot(immune, "Il17ra") # Th17
+FeaturePlot(immune, "Rorc") # Treg
+FeaturePlot(immune, "Foxp3") # Treg
+immune_marker <- FindAllMarkers(immune)
+write.csv(immune_marker, "immune_marker.csv")
+
+# immune Annotation_2: T, B, Mast, NK, Myeloid, Proliferation, Neutrophil, Doublet
+B_cell <- subset(immune[,immune$seurat_clusters %in% c(1, 20, 21, 27)])
+T_cell <- subset(immune[,immune$seurat_clusters %in% c(2, 3, 4, 5, 10, 11, 17)])
+Mast_cell <- subset(immune[,immune$seurat_clusters %in% c(6, 7)])
+NK_cell <- subset(immune[,immune$seurat_clusters %in% c(9)])
+Myeloid <- subset(immune[,immune$seurat_clusters %in% c(8, 12, 13, 14, 16, 18, 22, 23, 26, 31)])
+Proliferation <- subset(immune[,immune$seurat_clusters %in% c(15)])
+Neutrophil <- subset(immune[,immune$seurat_clusters %in% c(25)])
+Doublet <- subset(immune[,immune$seurat_clusters %in% c(0, 19, 24, 28, 29, 30)])
+B_cell$annotation_2 <- "B_cell"
+T_cell$annotation_2 <- "T_cell"
+Mast_cell$annotation_2 <- "Mast_cell"
+NK_cell$annotation_2 <- "NK_cell"
+Myeloid$annotation_2 <- "Myeloid"
+Proliferation$annotation_2 <- "Proliferation"
+Neutrophil$annotation_2 <- "Neutrophil"
+Doublet$annotation_2 <- "Doublet"
+
+immune[["annotation_2"]] <- c(B_cell$annotation_2, T_cell$annotation_2, Mast_cell$annotation_2, 
+                              NK_cell$annotation_2, Myeloid$annotation_2, Proliferation$annotation_2, 
+                              Neutrophil$annotation_2, Doublet$annotation_2)
+DimPlot(immune, group.by = "annotation_2")
+run_preprocessing(B_cell, "B_cell.rds")
+run_preprocessing(T_cell, "T_cell.rds")
+run_preprocessing(Mast_cell, "Mast_cell.rds")
+run_preprocessing(NK_cell, "NK_cell.rds")
+run_preprocessing(Myeloid, "Myeloid.rds")
+run_preprocessing(Proliferation, "Proliferation.rds")
+run_preprocessing(Neutrophil, "Neutrophil.rds")
+run_preprocessing(Doublet, "Doublet_immune.rds")
+group2[["annotation_2"]] <- c(stromal$annotation_2, immune$annotation_2)
+DimPlot(group2, group.by = "annotation_2")
+
+# T_cell Annotation_3: "CD4+","CD8+","Naïve","NKT","γδ T/NKT","Th17","Treg","Low_quality","Th2"
+DimPlot(T_cell, label = T)
+DimPlot(T_cell, group.by = "genotype")
+DimPlot(T_cell, group.by = "scDblFinder.class")
+T_cell_marker <- FindAllMarkers(T_cell)
+write.csv(T_cell_marker, "T_cell_marker.csv")
+T_cell <- FindClusters(T_cell, resolution = 0.4) 
+T_cell_marker <- FindAllMarkers(T_cell)
+write.csv(T_cell_marker, "T_cell_marker.csv")
+VlnPlot(T_cell, "nCount_RNA")
+FeaturePlot(T_cell, "Ccr7") # Naive
+FeaturePlot(T_cell, "S100a4")
+FeaturePlot(T_cell, "Cd8a")
+FeaturePlot(T_cell, "Foxp3")
+subcluster_T <- c("CD4+","CD8+","Naïve","NKT","γδ T/NKT","Th17","Treg","Low_quality","Th2")
+T_cell <- annotation_3(T_cell, subcluster_T)
+saveRDS(T_cell, "T_cell.rds")
+
+# B_cell Annotation_3: "B","Plasma","B","B","B","Low_quality","Doublet"
+DimPlot(B_cell, label = T)
+DimPlot(B_cell, group.by = "genotype")
+DimPlot(B_cell, group.by = "scDblFinder.class")
+B_cell <- FindClusters(B_cell, resolution = 0.2) 
+B_cell_marker <- FindAllMarkers(B_cell)
+write.csv(B_cell_marker, "B_cell_marker.csv")
+VlnPlot(B_cell, "nCount_RNA")
+FeaturePlot(B_cell, "Ms4a1")
+FeaturePlot(B_cell, "Xbp1")
+FeaturePlot(B_cell, "Cd38")
+subcluster_B <- c("B","Plasma","B","B","B","Low_quality","Doublet")
+B_cell <- annotation_3(B_cell, subcluster_B)
+saveRDS(B_cell, "B_cell.rds")
+
+# Mast_cell Annotation_3: "Mast1", "Mast2", "Doublet"
+DimPlot(Mast_cell, label = T)
+DimPlot(Mast_cell, group.by = "genotype")
+DimPlot(Mast_cell, group.by = "scDblFinder.class")
+Mast_cell <- FindClusters(Mast_cell, resolution = 0.3)
+VlnPlot(Mast_cell, "nCount_RNA")
+Mast_cell_marker <- FindAllMarkers(Mast_cell)
+write.csv(Mast_cell_marker, "Mast_cell_marker.csv")
+FeaturePlot(Mast_cell, "Gzmb")
+FeaturePlot(Mast_cell, "Sparc", split.by = "genotype")
+FeaturePlot(Mast_cell, "Pdgfra", split.by = "genotype")
+FeaturePlot(Mast_cell, "Rhoj", split.by = "genotype")
+FeaturePlot(Mast_cell, "Cpa3", split.by = "genotype")
+FeaturePlot(Mast_cell, "Cma1", split.by = "genotype")
+FeaturePlot(Mast_cell, "Mcpt1")
+subcluster_Mast <- c("Mast1", "Mast2", "Doublet")
+Mast_cell <- annotation_3(Mast_cell, subcluster_Mast)
+saveRDS(Mast_cell, "Mast_cell.rds")
+
+# Myeloid Annotation_3: "Mono","Proliferation","Mac M2-like","Mono","cDC","Mac","Xcr1+ DC","Mac Trem2+","Mac Trem2+","Doublet","Mono","Proliferation","DC3","Mono","Doublet","Low_quality","DC3","Doublet","Doublet","Doublet","Mac Alox15+"
+DimPlot(Myeloid, label = T)
+DimPlot(Myeloid, group.by = "genotype")
+DimPlot(Myeloid, group.by = "scDblFinder.class")
+Myeloid_marker <- FindAllMarkers(Myeloid)
+write.csv(Myeloid_marker, "Myeloid_marker.csv")
+VlnPlot(Myeloid, "nCount_RNA")
+FeaturePlot(Myeloid, "Lyve1")
+FeaturePlot(Myeloid, "Adgre1")
+FeaturePlot(Myeloid, "Mrc1")
+FeaturePlot(Myeloid, "Itgax")
+FeaturePlot(Myeloid, "Itgam")
+FeaturePlot(Myeloid, "Flt3")
+FeaturePlot(Myeloid, "Klra2")
+FeaturePlot(Myeloid, "Adgre1")
+VlnPlot(Myeloid, "Pax5")
+VlnPlot(Myeloid, "Cd19")
+FeaturePlot(Myeloid, "Lyve1")
+VlnPlot(Myeloid, "Alox15")
+VlnPlot(Myeloid, "Pdgfra")
+FeaturePlot(Myeloid, "Trem2")
+FeaturePlot(Myeloid, "Cd36")
+VlnPlot(Myeloid, "Pdgfra")
+Myeloid <- CellCycleScoring(Myeloid, s.features = cellcycle$s.genes, g2m.features = cellcycle$g2m.genes)
+DimPlot(Myeloid, group.by = "Phase")
+subcluster_Myeloid <- c("Mono","Proliferation","Mac M2-like","Mono","cDC","Mac","Xcr1+ DC","Mac Trem2+","Mac Trem2+","Doublet","Mono","Proliferation","DC3","Mono","Doublet","Low_quality","DC3","Doublet","Doublet","Doublet","Mac Alox15+")
+Myeloid <- annotation_3(Myeloid, subcluster_Myeloid)
+saveRDS(Myeloid, "Myeloid.rds")
+
+# Finalize immune annotation_3 
+DimPlot(immune, group.by = "annotation_2")
+RBC$annotation_3 <- "RBC"
+Doublet$annotation_3 <- "Doublet"
+NK_cell$annotation_3 <- "NK_cell"
+Neutrophil$annotation_3 <- "Neutrophil"
+Proliferation$annotation_3 <- "Proliferation"
+immune[["annotation_3"]] <- c(RBC$annotation_3, Doublet$annotation_3, NK_cell$annotation_3, 
+                              Neutrophil$annotation_3, Proliferation$annotation_3, T_cell$annotation_3,
+                              B_cell$annotation_3, Myeloid$annotation_3, Mast_cell$annotation_3)
+DimPlot(immune, group.by = "annotation_3")
+DimPlot(immune, group.by = "scDblFinder.class")
+Doublet <- subset(immune[,immune$seurat_clusters %in% c(0, 19, 24, 28, 29, 30)])
+
+# Finalize group2 annotation_3 
+group2[["annotation_3"]] <- c(stromal$annotation_3, immune$annotation_3)
+DimPlot(group2, group.by = "annotation_3")
+
+# Modifying the name of group2 annotation_3 
+from_names <- c("cDC","Th17","PreAd","Mes2","CD8+","Doublet","Mono","CD4+","B","Naïve","Low_quality","Proliferation","Mes1","Mast2","Plasma","Mac","Mast1","ASC","Endothelial","Xcr1+ DC","RBC","γδ T/NKT","Treg","NKT","IFN-stimulated","Mac Trem2+","Th2","Neutrophil","NK_cell","Mac M2-like","DC3","SMC_like","Epithelial","Mac Alox15+","SMC","LEC")
+to_names <- c("DC_classic","Th17","ASPC_PreAD","Mes2","T_CD8+","Doublet","Mono","T_CD4+","B","T_Naïve","Low_quality","Proliferation_immune","Mes1","Mast2","Plasma","Mac","Mast1","ASPC_ASC","Endothelial","DC_Xcr1+","RBC","T_NKT/γδ T","Treg","NKT","ASPC_IFN+","Mac Trem2+","Th2","Neutrophil","NK_cell","Mac M2-like","DC3","ASPC_SMC_like","Epithelial","Mac Alox15+","SMC","LEC")
+group2@meta.data$annotation_3 <- to_names[match(group2@meta.data$annotation_3, from_names)]
+
+# Modifying the name of group3 annotation_3 
+from_names <- c("DC_classic","Th17","ASPC_PreAD","Mes2","T_CD8+","Mono","T_CD4+","B","T_Naïve","Proliferation_immune","Mes1","Mast2","Plasma","Mac","Mast1","ASPC_ASC","Endothelial","DC_Xcr1+","T_NKT/γδ T","Treg","NKT","ASPC_IFN+","Mac Trem2+","Th2","Neutrophil","NK_cell","Mac M2-like","DC3","ASPC_SMC_like","Epithelial","Mac Alox15+","SMC","LEC")
+to_names <- c("DC_classic","Th17","ASPC_PreAD","Mes2","T_CD8+","Mono","T_CD4+","B","T_Naïve","Proliferation","Mes1","Mast2","Plasma","Mac","Mast1","ASPC_ASC","Endothelial","DC_Xcr1+","T_NKT/γδ T","Treg","NKT","ASPC_IFN+","Mac_Trem2+","Th2","Neutrophil","NK_cell","Mac_M2-like","DC3","ASPC_SMC_like","Epithelial","Mac_Alox15+","SMC","LEC")
+group3@meta.data$annotation_3 <- to_names[match(group3@meta.data$annotation_3, from_names)]
+
+
+# --------------------------------- #
+# group2 QC-passed cells ==> group 3
+# --------------------------------- #
+
+# group2 QC ==> Doublet, Low_quality, RBC exclusion ==> group3
+exclude_labels <- c("Doublet", "Low_quality", "RBC")
+group3 <- group2[, !(group2@meta.data$annotation_3 %in% exclude_labels)]
+run_preprocessing(group3, "group3.rds")
+
+table(group3$genotype) # WT 19878   KO 33983 cells
+
+# Annotation_2.5
+group3@meta.data$annotation_3[group3@meta.data$annotation_3 == "Mac Alox15+"] <- "Mac"
+Idents(group3) <- group3$annotation_2.5
+new.cluster.ids <- c("DC", "T", "ASPC", "Mes", "Mono", "B", "Prol", "Mast", "Mac", "Endo", "Neu", "NK", "Epi")
+names(new.cluster.ids) <- levels(group3)
+group3 <- RenameIdents(group3, new.cluster.ids)
+group3@meta.data$annotation_2.5 <- group3@active.ident
+new_order <- c("ASPC", "Mes", "Epi", "Endo", "T", "NK", "B", "Mast", "Mono", "Mac", "DC", "Neu", "Prol")
+group3@meta.data$annotation_2.5 <- factor(group3@meta.data$annotation_2.5, levels = new_order)
+DimPlot(group3, group.by = "annotation_2.5", label = F) + NoLegend() + theme(plot.title = element_blank()) # 600 x 450 (Figure)
+DimPlot(group3, group.by = "genotype", label = F, cols = c("grey", "red")) + NoLegend() + theme(plot.title = element_blank()) # 600 x 450 (Figure)
+# Elinate WT-1
+group3$sample <- droplevels(group3$sample, exclude = "WT-1")
+saveRDS(group3, "group3.rds")
+
+DimPlot(group3, group.by = "annotation_2.5") + ggtitle("") + NoLegend() # Figure S3a Export: 800 x 600
+DimPlot(group3, group.by = "genotype", cols = c("grey", "red")) + ggtitle("") + NoLegend() # Figure S3c Export: 800 x 600
+
+
+# --------------------------------- #
+# Figure S3
+# --------------------------------- #
+
+# Annotation 2.5 Markers (Figure S3b)
+markers <- FindAllMarkers(group3, only.pos = TRUE, group.by = "annotation_2.5")
+write.csv(markers, "Annotation_2.5_markers.csv")
+top_markers <- c("Pdgfra","Dpep1","Upk3b","Msln","Dsg2","Krt76","Cdh5","Cyyr1","Cd3e","Il7r","Klrd1","Gzma","Cd79a","Pax5","Cpa3","Cma1","Cybb","Adgre4","Adgre1","Ms4a7","Flt3","Clec9a","Csf3r","S100a8","Mki67","Top2a")
+avg_expression <- AverageExpression(group3, 
+                                    features = top_markers, group.by = "annotation_2.5")
+avg_expression <- avg_expression$RNA # Assuming the assay you are working with is "RNA"
+avg_expression <- as.matrix(avg_expression)
+scaled_avg_expression <- t(scale(t(avg_expression)))
+color_breaks <- seq(-4, 4, length.out = 100)
+color_palette <- colorRampPalette(c("blue", "white", "red"))(length(color_breaks) - 1)
+pheatmap(
+  scaled_avg_expression,
+  color = color_palette,
+  breaks = color_breaks,
+  show_rownames = T,
+  show_colnames = F,
+  cluster_rows = F,
+  cluster_cols = F,
+  fontsize_row = 18,
+  fontsize_col = 15, 
+  legend = F
+) # Figures S3b Export 700 x 500 
+
+# Calculate the cell proportions for each sample (Figure S3d)
+proportions <- group3@meta.data %>%
+  group_by(sample, annotation_2.5) %>%
+  summarize(Count = n()) %>%
+  mutate(Proportion = Count / sum(Count))
+proportions_wide <- proportions %>%
+  pivot_wider(names_from = annotation_2.5, values_from = Proportion, values_fill = 0) 
+write.csv(proportions_wide, file = "cell_proportions.csv", row.names = FALSE)
+proportions <- group3@meta.data %>%
+  group_by(genotype, annotation_2.5) %>%
+  summarize(Count = n(), .groups = 'drop') %>%
+  group_by(genotype) %>%
+  mutate(Proportion = Count / sum(Count))
+pie_data <- proportions %>%
+  group_by(genotype) %>%
+  do(data.frame(annotation = .$annotation_2.5, Proportion = .$Proportion))
+plots <- lapply(split(pie_data, pie_data$genotype), function(df) {
+  ggplot(df, aes(x = "", y = Proportion, fill = annotation)) +
+    geom_bar(stat = "identity", width = 1) +
+    coord_polar("y", start = 0) +
+    theme_void() +
+    labs(fill = "Annotation", title = paste("Pie Chart for", df$genotype[1])) %>%
+    ggplotly()
+})
+
+FeaturePlot(group3, "Cma1") # Figure S3e Export: 800 x 600
+FeaturePlot(group3, "Cma1", split.by = "genotype") + NoLegend() # Figure S3e Export: 1200 x 600
+
+
+# --------------------------------- #
+# Figure S3 version 2
+# --------------------------------- #
+
+
+group3$annotation_2.5.1 <- group3$annotation_2.5
+levels(group3$annotation_2.5.1)[levels(group3$annotation_2.5.1) %in% c("Mono", "Mac", "Neu", "DC")] <- "Myeloid"
+
+DimPlot(group3, group.by = "annotation_2.5.1") + ggtitle("") + NoLegend() # Figure S3a Export: 800 x 600
+
+# Annotation 2.5.1 Markers (Figure S3b)
+Idents(group3) <- group3$annotation_2.5.1
+markers <- FindAllMarkers(group3, only.pos = TRUE)
+write.csv(markers, "Annotation_2.5.1_markers.csv")
+top_markers <- c("Pdgfra","Dpep1","Upk3b","Msln","Dsg2","Krt76","Cdh5","Cyyr1","Cd3e","Il7r","Klrd1","Gzma","Cd79a","Pax5","Cpa3","Cma1","Lyz2", "Cybb","Mki67","Top2a")
+avg_expression <- AverageExpression(group3, 
+                                    features = top_markers, group.by = "annotation_2.5.1")
+avg_expression <- avg_expression$RNA # Assuming the assay you are working with is "RNA"
+avg_expression <- as.matrix(avg_expression)
+scaled_avg_expression <- t(scale(t(avg_expression)))
+color_breaks <- seq(-4, 4, length.out = 100)
+color_palette <- colorRampPalette(c("blue", "white", "red"))(length(color_breaks) - 1)
+pheatmap(
+  scaled_avg_expression,
+  color = color_palette,
+  breaks = color_breaks,
+  show_rownames = T,
+  show_colnames = F,
+  cluster_rows = F,
+  cluster_cols = F,
+  fontsize_row = 18,
+  fontsize_col = 15, 
+  legend = F
+) # Figures S3b Export 700 x 500 
+
+# Calculate the cell proportions for each sample (Figure S3d)
+proportions <- group3@meta.data %>%
+  group_by(sample, annotation_2.5.1) %>%
+  summarize(Count = n()) %>%
+  mutate(Proportion = Count / sum(Count))
+write.csv(proportions, "cell_proportions.csv")
+proportions_wide <- proportions %>%
+  pivot_wider(names_from = annotation_2.5.1, values_from = Proportion, values_fill = 0) 
+write.csv(proportions_wide, file = "cell_proportions_wide.csv", row.names = FALSE)
+proportions <- group3@meta.data %>%
+  group_by(genotype, annotation_2.5.1) %>%
+  summarize(Count = n(), .groups = 'drop') %>%
+  group_by(genotype) %>%
+  mutate(Proportion = Count / sum(Count))
+pie_data <- proportions %>%
+  group_by(genotype) %>%
+  do(data.frame(annotation = .$annotation_2.5.1, Proportion = .$Proportion))
+plots <- lapply(split(pie_data, pie_data$genotype), function(df) {
+  ggplot(df, aes(x = "", y = Proportion, fill = annotation)) +
+    geom_bar(stat = "identity", width = 1) +
+    coord_polar("y", start = 0) +
+    theme_void() +
+    labs(fill = "Annotation", title = paste("Pie Chart for", df$genotype[1])) %>%
+    ggplotly()
+})
+
+FeaturePlot(group3, "Cma1") # Figure S3e Export: 800 x 600
+FeaturePlot(group3, "Cma1", split.by = "genotype") + NoLegend() # Figure S3e Export: 1200 x 600
+
+
+# --------------------------------- #
+# Figure 3
+# --------------------------------- #
+
+# Mast_cell
+Mast_cell_group3 <- subset(group3[,group3$annotation_2 == "Mast_cell"])
+run_preprocessing(Mast_cell_group3, "Mast_cell_group3.rds")
+DimPlot(Mast_cell_group3)
+DimPlot(Mast_cell_group3, split.by = "genotype", pt.size = 2, 
+        group.by = "genotype", cols = c("grey40", rgb(0.9,0,0))) + ggtitle("") + NoLegend() # Figure 3a, Export: 1000x600
+
+# Heatmap Figure 3b
+selected_samples <- c("WT-2", "WT-3", "KO-1", "KO-2", "KO-3")
+selected_genes <- c("Tpsb2", "Tpsab1", "Cma1", "Mcpt4", "Cpa3", "Fcer1a", "Gzmb", "Fcer1a", "Gab2", "Grb2", "Adora3", "Timgd3", "Car8", "cd300a", "Fyn", "Lgals9")
+
+avg_expression <- AverageExpression(Mast_cell_group3, 
+                                    features = selected_genes, group.by = "sample")
+avg_expression <- avg_expression$RNA # Assuming the assay you are working with is "RNA"
+avg_expression <- as.matrix(avg_expression)
+scaled_avg_expression <- t(scale(t(avg_expression)))
+
+# Color palette and breaks (Figure)
+color_breaks <- seq(-1.5, 1.5, length.out = 100)
+color_palette <- colorRampPalette(c("blue", "white", "red"))(length(color_breaks) - 1)
+pheatmap(
+  scaled_avg_expression,
+  color = color_palette,
+  breaks = color_breaks,
+  show_rownames = T,
+  show_colnames = F,
+  cluster_rows = F,
+  cluster_cols = F,
+  fontsize_row = 18,
+  fontsize_col = 12, 
+  legend = F
+) # 500 x 500 Figure 3b
+
+# --------------------------------- #
+# Figure S5
+# --------------------------------- #
+
+# FeaturePlot Immune_group3_macrophages Figure S5d
+FeaturePlot(immune_group3, "Lpl") # Figure S5d, 400 x 400
+FeaturePlot(immune_group3, "Cbr2") # Figure S5d, 400 x 400
+FeaturePlot(immune_group3, "Lyve1", order = T) # Figure S5d, 400 x 400
+
+# FetchData for Figure S5e
+Lpl <- FetchData(immune_group3, vars = c("Lpl", "annotation_2.5", "genotype"))
+write.csv(Lpl, "Lpl_expression_data.csv")
+Ctsd <- FetchData(immune_group3, vars = c("Ctsd", "annotation_2.5", "genotype"))
+write.csv(Ctsd, "Ctsd_expression_data.csv")
+Ctsk <- FetchData(immune_group3, vars = c("Ctsk", "annotation_2.5", "genotype"))
+write.csv(Ctsk, "Ctsk_expression_data.csv")
+Nceh1 <- FetchData(immune_group3, vars = c("Nceh1", "annotation_2.5", "genotype"))
+write.csv(Nceh1, "Nceh1_expression_data.csv")
+Cbr2 <- FetchData(immune_group3, vars = c("Cbr2", "annotation_2.5", "genotype"))
+write.csv(Cbr2, "Cbr2_expression_data.csv")
+Fcrls <- FetchData(immune_group3, vars = c("Fcrls", "annotation_2.5", "genotype"))
+write.csv(Fcrls, "Fcrls_expression_data.csv")
+F13a1 <- FetchData(immune_group3, vars = c("F13a1", "annotation_2.5", "genotype"))
+write.csv(F13a1, "F13a1_expression_data.csv")
+
+# --------------------------------- #
+# Figure 5
+# --------------------------------- #
+
+# Figure 5
+# ASPC group3 (Figure)
+DimPlot(ASPC_group3)
+ASPC_group3 <- subset(group3[,group3$annotation_2.5 == "ASPC"])
+run_preprocessing(ASPC_group3, "ASPC_group3.rds")
+ASPC_group3 <- FindClusters(ASPC_group3, resolution = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3))
+
+# Annotation_3.5 "Progenitor","Progenitor","Progenitor","Pro-Fibrotic","Progenitor","Progenitor","Stem","Progenitor","Pro-Fibrotic","Progenitor","Progenitor","Progenitor","Pro-Fibrotic"
+new.cluster.ids <- c("Progenitor","Progenitor","Progenitor","Pro-Fibrotic","Progenitor","Progenitor","Stem",
+                     "Progenitor","Pro-Fibrotic","Progenitor","Progenitor","Progenitor","Pro-Fibrotic")
+Idents(ASPC_group3) <- ASPC_group3$RNA_snn_res.0.7
+names(new.cluster.ids) <- levels(ASPC_group3) 
+ASPC_group3 <- RenameIdents(ASPC_group3, new.cluster.ids) 
+ASPC_group3$annotation_3.5 <- ASPC_group3@active.ident 
+ASPC_group3$annotation_3.5 <- factor(ASPC_group3$annotation_3.5, levels = c("Stem", "Progenitor", "Pro-Fibrotic"))
+Idents(ASPC_group3) <- ASPC_group3$annotation_3.5
+DimPlot(ASPC_group3, label = F, split.by = "genotype", cols = c("#24B700",  "#D575FE", "#F8766D")) + NoLegend() # Figure 5a 800 x 450
+saveRDS(ASPC_group3, "ASPC_group3.rds")
+
+# Calculate ASPC subpopulations for each sample (Figure 5a)
+proportions <- ASPC_group3@meta.data %>%
+  group_by(sample, annotation_3.5) %>%
+  summarize(Count = n()) %>%
+  mutate(Proportion = Count / sum(Count))
+# Pivot the data to wide format
+proportions_wide <- proportions %>%
+  pivot_wider(names_from = annotation_3.5, values_from = Proportion, values_fill = 0)
+# Write the proportions to a CSV file
+write.csv(proportions_wide, file = "ASPC_proportions.csv", row.names = FALSE)
+
+
+# Fibrotic Markers (Figure 5b)
+selected_genes = c("Col8a1", "Sdc1", "Timp1", "Col1a1", "Col6a1", "Pcolce")
+avg_expression <- AverageExpression(ASPC_group3, 
+                                    features = selected_genes, group.by = "sample")
+avg_expression <- avg_expression$RNA # Assuming the assay you are working with is "RNA"
+avg_expression <- as.matrix(avg_expression)
+scaled_avg_expression <- t(scale(t(avg_expression)))
+
+# Color palette and breaks (Figure 5b)
+color_breaks <- seq(-1.5, 1.5, length.out = 100)
+color_palette <- colorRampPalette(c("blue", "white", "red"))(length(color_breaks) - 1)
+pheatmap(
+  scaled_avg_expression,
+  color = color_palette,
+  breaks = color_breaks,
+  show_rownames = T,
+  show_colnames = F,
+  cluster_rows = F,
+  cluster_cols = F,
+  fontsize_row = 18,
+  fontsize_col = 12, 
+  legend = F,
+) # 400 x 400      
+
+# VlnPlot (Figure 5c)
+VlnPlot(ASPC_group3, "Sdc1", group.by = "genotype", split.by = "genotype", cols = c("grey", "red"), pt.size = 0) + NoLegend() + theme(axis.title.x = element_blank()) # 300 x 400
+Sdc1 <- FetchData(ASPC_group3, vars = c("Sdc1", "genotype"))
+write.csv(Sdc1, "Sdc1_expression_data.csv")
+
+VlnPlot(ASPC_group3, "Timp1", group.by = "genotype", split.by = "genotype", cols = c("grey", "red"), pt.size = 0) + NoLegend() + theme(axis.title.x = element_blank()) # 300 x 400
+Timp1 <- FetchData(ASPC_group3, vars = c("Timp1", "genotype"))
+write.csv(Timp1, "Timp1_expression_data.csv")
+
+VlnPlot(ASPC_group3, "Col1a1", group.by = "genotype", split.by = "genotype", cols = c("grey", "red"), pt.size = 0) + NoLegend() + theme(axis.title.x = element_blank()) # 300 x 400
+Col1a1 <- FetchData(ASPC_group3, vars = c("Col1a1", "genotype"))
+write.csv(Col1a1, "Col1a1_expression_data.csv")
+
+
+# --------------------------------- #
+# Figure S10
+# --------------------------------- #
+
+# Immune_group3
+immune_group3 <- subset(group3[,group3$annotation_1 == "immune"])
+run_preprocessing(immune_group3, "immune_group3.rds")
+saveRDS(immune_group3, "immune_group3.rds")
+
+# Immune cell annotation
+DimPlot(immune_group3, group.by = "annotation_2", label = F) + NoLegend() + ggtitle("") # Figures S10a, Export: 800 x 600
+DimPlot(immune_group3, group.by = "annotation_2", label = F, split.by = "genotype") + NoLegend() + ggtitle("") # Figures S10a, Export: 1200 x 600
+
+# --------------------------------- #
+# Figure Cellchat Database update 
+# --------------------------------- #
+
+# Cellchat v2 (add Lgals3)
+CellChatDB <- CellChatDB.mouse # set CellChatDB <- CellChatDB.human if working on the human dataset
+interaction_input <- CellChatDB$interaction
+complex_input <- CellChatDB$complex
+cofactor_input <- CellChatDB$cofactor
+geneInfo <- CellChatDB$geneInfo
+write.csv(interaction_input, file = "interaction_input_CellChatDB.csv")
+write.csv(complex_input, file = "complex_input_CellChatDB.csv")
+write.csv(cofactor_input, file = "cofactor_input_CellChatDB.csv")
+write.csv(geneInfo, file = "geneInfo_input_CellChatDB.csv")
+setwd("~/count/CellChatDB_mouse")
+
+options(stringsAsFactors = FALSE)
+interaction_input <- read.csv(file = 'interaction_input_CellChatDB.csv', row.names = 1)
+complex_input <- read.csv(file = 'complex_input_CellChatDB.csv', row.names = 1)
+cofactor_input <- read.csv(file = 'cofactor_input_CellChatDB.csv', row.names = 1)
+geneInfo <- read.csv(file = 'geneInfo_input_CellChatDB.csv', row.names = 1)
+CellChatDB <- list()
+CellChatDB$interaction <- interaction_input
+CellChatDB$complex <- complex_input
+CellChatDB$cofactor <- cofactor_input
+CellChatDB$geneInfo <- geneInfo
+
+setwd("~/AppData/Local/R/win-library/4.3/CellChat") # This is the folder of CellChat package downloaded from Github
+CellChatDB.mouse <- CellChatDB
+usethis::use_data(CellChatDB.mouse, overwrite = TRUE)
+
+# --------------------------------- #
+# Figure Cellchat Immune cell processing 
+# --------------------------------- #
+
+# Cellchat Immune Preprcessing
+WT <- subset(immune_group3[,immune_group3$genotype == "WT"])
+KO <- subset(immune_group3[,immune_group3$genotype == "KO"])
+immune_cellchat_WT <- createCellChat(WT, group.by = "annotation_2.5")
+immune_cellchat_KO <- createCellChat(KO, group.by = "annotation_2.5")
+CellChatDB <- CellChatDB.mouse
+showDatabaseCategory(CellChatDB)
+# set the used database in the object
+immune_cellchat_WT@DB <- CellChatDB
+immune_cellchat_KO@DB <- CellChatDB
+# subset the expression data of signaling genes for saving computation cost
+immune_cellchat_WT <- subsetData(immune_cellchat_WT)
+immune_cellchat_KO <- subsetData(immune_cellchat_KO)
+# subset the expression data of signaling genes for saving computation cost
+immune_cellchat_WT <- identifyOverExpressedGenes(immune_cellchat_WT)
+immune_cellchat_KO <- identifyOverExpressedGenes(immune_cellchat_KO)
+immune_cellchat_WT <- identifyOverExpressedInteractions(immune_cellchat_WT)
+immune_cellchat_KO <- identifyOverExpressedInteractions(immune_cellchat_KO)
+immune_cellchat_WT <- projectData(immune_cellchat_WT, PPI.mouse)
+immune_cellchat_KO <- projectData(immune_cellchat_KO, PPI.mouse)
+immune_cellchat_WT <- computeCommunProb(immune_cellchat_WT)
+immune_cellchat_KO <- computeCommunProb(immune_cellchat_KO)
+immune_cellchat_WT <- filterCommunication(immune_cellchat_WT, min.cells = 5)
+immune_cellchat_KO <- filterCommunication(immune_cellchat_KO, min.cells = 5)
+df.net <- subsetCommunication(immune_cellchat_WT) # returns a data frame consisting of all the inferred cell-cell communications at the level of ligands/receptors. 
+df.net <- subsetCommunication(immune_cellchat_KO) # returns a data frame consisting of all the inferred cell-cell communications at the level of ligands/receptors. 
+# Set slot.name = "netP" to access the the inferred communications at the level of signaling pathways
+immune_cellchat_WT <- computeCommunProbPathway(immune_cellchat_WT)
+immune_cellchat_KO <- computeCommunProbPathway(immune_cellchat_KO)
+immune_cellchat_WT <- aggregateNet(immune_cellchat_WT)
+immune_cellchat_KO <- aggregateNet(immune_cellchat_KO)
+
+# --------------------------------- #
+# Figure S10 Cellchat Whole SVC Processing
+# --------------------------------- #
+
+# Cellchat
+WT <- subset(group3[,group3$genotype == "WT"])
+KO <- subset(group3[,group3$genotype == "KO"])
+SVC_cellchat_WT <- createCellChat(WT, group.by = "annotation_2.5")
+SVC_cellchat_KO <- createCellChat(KO, group.by = "annotation_2.5")
+CellChatDB <- CellChatDB.mouse
+showDatabaseCategory(CellChatDB)
+# set the used database in the object
+SVC_cellchat_WT@DB <- CellChatDB
+SVC_cellchat_KO@DB <- CellChatDB
+# subset the expression data of signaling genes for saving computation cost
+SVC_cellchat_WT <- subsetData(SVC_cellchat_WT)
+SVC_cellchat_KO <- subsetData(SVC_cellchat_KO)
+# subset the expression data of signaling genes for saving computation cost
+SVC_cellchat_WT <- identifyOverExpressedGenes(SVC_cellchat_WT)
+SVC_cellchat_KO <- identifyOverExpressedGenes(SVC_cellchat_KO)
+SVC_cellchat_WT <- identifyOverExpressedInteractions(SVC_cellchat_WT)
+SVC_cellchat_KO <- identifyOverExpressedInteractions(SVC_cellchat_KO)
+SVC_cellchat_WT <- projectData(SVC_cellchat_WT, PPI.mouse)
+SVC_cellchat_KO <- projectData(SVC_cellchat_KO, PPI.mouse)
+SVC_cellchat_WT <- computeCommunProb(SVC_cellchat_WT)
+SVC_cellchat_KO <- computeCommunProb(SVC_cellchat_KO)
+SVC_cellchat_WT <- filterCommunication(SVC_cellchat_WT, min.cells = 5)
+SVC_cellchat_KO <- filterCommunication(SVC_cellchat_KO, min.cells = 5)
+df.net <- subsetCommunication(SVC_cellchat_WT) # returns a data frame consisting of all the inferred cell-cell communications at the level of ligands/receptors. 
+df.net <- subsetCommunication(SVC_cellchat_KO) # returns a data frame consisting of all the inferred cell-cell communications at the level of ligands/receptors. 
+# Set slot.name = "netP" to access the the inferred communications at the level of signaling pathways
+SVC_cellchat_WT <- computeCommunProbPathway(SVC_cellchat_WT)
+SVC_cellchat_KO <- computeCommunProbPathway(SVC_cellchat_KO)
+SVC_cellchat_WT <- aggregateNet(SVC_cellchat_WT)
+SVC_cellchat_KO <- aggregateNet(SVC_cellchat_KO)
+
+# --------------------------------- #
+# Figure S10b Cellchat Whole SVC Figure
+# --------------------------------- #
+
+groupSize <- as.numeric(table(SVC_cellchat_WT@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(SVC_cellchat_WT@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+netVisual_circle(SVC_cellchat_WT@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+groupSize <- as.numeric(table(SVC_cellchat_KO@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(SVC_cellchat_KO@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+netVisual_circle(SVC_cellchat_KO@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+
+# Compute the network centrality scores
+SVC_cellchat_WT <- netAnalysis_computeCentrality(SVC_cellchat_WT, slot.name = "netP") # the slot 'netP' means the inferred intercellular communication network of signaling pathways
+SVC_cellchat_KO <- netAnalysis_computeCentrality(SVC_cellchat_KO, slot.name = "netP") # the slot 'netP' means the inferred intercellular communication network of signaling pathways
+
+# Comparing WT vs KO
+SVC_cellchat_WT <- updateCellChat(SVC_cellchat_WT)
+SVC_cellchat_KO <- updateCellChat(SVC_cellchat_KO)
+object.list <- list(WT = SVC_cellchat_WT, KO = SVC_cellchat_KO)
+SVC_cellchat <- mergeCellChat(object.list, add.names = names(object.list))
+SVC_cellchat@meta$datasets = factor(SVC_cellchat@meta$datasets, levels = c("WT", "KO")) # set factor level (Figure)
+
+gg1 <- netVisual_bubble(SVC_cellchat, sources.use = 8, targets.use = c(1:1),  comparison = c(1, 2), max.dataset = 2, title.name = "Increased signaling in KO", angle.x = 45, remove.isolate = T)
+gg1 # Figure S10b
+
+saveRDS(SVC_cellchat_WT, "SVC_cellchat_WT.rds")
+saveRDS(SVC_cellchat_KO, "SVC_cellchat_KO.rds")
+
+
+# --------------------------------- #
+# Figure S10 Cellchat Figure
+# --------------------------------- #
+
+# Figure S10b
+groupSize <- as.numeric(table(immune_cellchat_WT@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(immune_cellchat_WT@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+netVisual_circle(immune_cellchat_WT@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+groupSize <- as.numeric(table(immune_cellchat_KO@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(immune_cellchat_KO@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+netVisual_circle(immune_cellchat_KO@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+
+# Compute the network centrality scores
+immune_cellchat_WT <- netAnalysis_computeCentrality(immune_cellchat_WT, slot.name = "netP") # the slot 'netP' means the inferred intercellular communication network of signaling pathways
+immune_cellchat_KO <- netAnalysis_computeCentrality(immune_cellchat_KO, slot.name = "netP") # the slot 'netP' means the inferred intercellular communication network of signaling pathways
+
+# --------------------------------- #
+# Figure 6 WT and KO comparison
+# --------------------------------- #
+
+# Figure 6a
+object.list <- list(WT = immune_cellchat_WT, KO = immune_cellchat_KO)
+immune_cellchat <- mergeCellChat(object.list, add.names = names(object.list))
+gg1 <- netVisual_heatmap(immune_cellchat, font.size = 12,
+                         font.size.title = 12)
+gg2 <- netVisual_heatmap(immune_cellchat, measure = "weight", font.size = 12,
+                         font.size.title = 12)
+gg1 + gg2 # Figure 6a 500 x 400
+immune_cellchat@meta$datasets = factor(immune_cellchat@meta$datasets, levels = c("WT", "KO")) # set factor level (Figure)
+
+# --------------------------------- #
+# Figure S10c WT and KO comparison Mast to Mac
+# --------------------------------- #
+
+# Identify dysfunctional signaling by comparing the communication probabities: Mast to Mac
+netVisual_bubble(immune_cellchat, sources.use = 4, targets.use = (3:4),  comparison = c(1, 2), angle.x = 45, font.size = 15, font.size.title = 15) # 800 x 650
+gg1 <- netVisual_bubble(immune_cellchat, sources.use = 4, targets.use = c(3, 3),  comparison = c(1, 2), max.dataset = 2, 
+                        font.size = 15, font.size.title = 12, title.name = "Increased signaling in KO", angle.x = 45, remove.isolate = T)
+#> Comparing communications on a merged object
+gg2 <- netVisual_bubble(immune_cellchat, sources.use = 4, targets.use = c(2, 3, 7),  comparison = c(1, 2), max.dataset = 1, title.name = "Decreased signaling in KO", angle.x = 45, remove.isolate = T)
+#> Comparing communications on a merged object
+gg1 # Figure S10c
+
+
+# --------------------------------- #
+# VlnPlot Galectin Figure S10e
+# --------------------------------- #
+
+VlnPlot(immune_group3, "Lgals3", group.by = "annotation_2.5", split.by = "genotype", cols = c("grey", "red"), pt.size = 0) # Figure
+
+# --------------------------------- #
+# CellChat Galectin Figure 6b
+# --------------------------------- #
+
+# Identify dysfunctional signaling by using differential expression analysis
+# define a positive dataset, i.e., the dataset with positive fold change against the other dataset
+pos.dataset = "KO"
+# define a char name used for storing the results of differential expression analysis
+features.name = paste0(pos.dataset, ".merged")
+
+# perform differential expression analysis 
+immune_cellchat <- identifyOverExpressedGenes(immune_cellchat, group.dataset = "datasets", pos.dataset = pos.dataset, features.name = features.name, only.pos = FALSE, thresh.pc = 0.1, thresh.fc = 0.05,thresh.p = 0.05) 
+#> Use the joint cell labels from the merged CellChat object
+# map the results of differential expression analysis onto the inferred cell-cell communications to easily manage/subset the ligand-receptor pairs of interest
+net <- netMappingDEG(immune_cellchat, features.name = features.name)
+# extract the ligand-receptor pairs with upregulated ligands in LS
+net.up <- subsetCommunication(immune_cellchat, net = net, datasets = "WT",ligand.logFC = 0.05, receptor.logFC = NULL)
+# extract the ligand-receptor pairs with upregulated ligands and upregulated receptors in NL, i.e.,downregulated in LS
+net.down <- subsetCommunication(immune_cellchat, net = net, datasets = "KO",ligand.logFC = -0.05, receptor.logFC = NULL)
+gene.up <- extractGeneSubsetFromPair(net.up, immune_cellchat)
+gene.down <- extractGeneSubsetFromPair(net.down, immune_cellchat)
+pairLR.use.up = net.up[, "interaction_name", drop = F]
+gg1 <- netVisual_bubble(immune_cellchat, pairLR.use = pairLR.use.up, sources.use = 1, targets.use = c(1:13), comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Up-regulated signaling in ", names(object.list)[2]))
+#> Comparing communications on a merged object
+pairLR.use.down = net.down[, "interaction_name", drop = F]
+
+pathways.show <- c("GALECTIN") 
+par(mfrow = c(1,2), xpd=TRUE)
+ht <- list()
+for (i in 1:length(object.list)) {
+  ht[[i]] <- netVisual_heatmap(object.list[[i]], signaling = pathways.show, 
+                               color.heatmap = "Reds",
+                               font.size = 12,
+                               font.size.title = 12,
+                               title.name = paste(pathways.show, "signaling ", names(object.list)[i]))
+}
+#> Do heatmap based on a single object
+ComplexHeatmap::draw(ht[[1]] + ht[[2]], ht_gap = unit(0.5, "cm")) # Figure 500 x 400
+saveRDS(immune_cellchat_WT, "immune_cellchat_WT.rds")
+saveRDS(immune_cellchat_KO, "immune_cellchat_KO.rds")
+
+
+# --------------------------------- #
+# Figure S10d DotPlot
+# --------------------------------- #
+
+DotPlot(Mast_cell_group3, features = c("Lgals1","Lgals2","Lgals3","Lgals4","Lgals5","Lgals6","Lgals7","Lgals8",
+                                       "Lgals9","Lgals10","Lgals11","Lgals12","Lgals13","Lgals14","Lgals15"),
+        group.by = "genotype", scale = F) + coord_flip() + theme(axis.title.x = element_blank())# Figure 400 x 350
+
+
+
+# --------------------------------- #
+# VlnPlot Galectin Figure S10e
+# --------------------------------- #
+
+VlnPlot(Mast_cell_group3, "Lgals3", group.by = "genotype", split.by = "genotype", cols = c("grey", "red"), pt.size = 0) # Figure
+VlnPlot(Mast_cell_group3, "Lgals9", group.by = "genotype", split.by = "genotype", cols = c("grey", "red"), pt.size = 0) # Figure
+Lgals3 <- FetchData(Mast_cell_group3, vars = c("Lgals3", "genotype"))
+write.csv(Lgals3, "Lgals3_expression_data.csv")
+Lgals9 <- FetchData(Mast_cell_group3, vars = c("Lgals9", "genotype"))
+write.csv(Lgals9, "Lgals9_expression_data.csv")
+
+
+# --------------------------------- #
+# Figure S12
+# --------------------------------- #
+
+# Mast cell subpopulations
+Idents(Mast_cell_group3) <- Mast_cell_group3$annotation_3
+new.cluster.ids <- c("Mast1", "Mast2")
+names(new.cluster.ids) <- levels(Mast_cell_group3) 
+Mast_cell_group3 <- RenameIdents(Mast_cell_group3, new.cluster.ids)
+Mast_cell_group3$annotation_3 <- Mast_cell_group3@active.ident 
+
+DimPlot(Mast_cell_group3, group.by = "annotation_3", 
+        cols = c("#ff6464", "#9696ff")) + theme(plot.title = element_blank()) + NoLegend() # Figure S12a 
+DimPlot(Mast_cell_group3, group.by = "annotation_3", split.by = "genotype", cols = c("#ff6464", "#9696ff")) + 
+  theme(plot.title = element_blank()) + NoLegend() # Figure S12a Figure 800 x 450
+
+# Volcano Plot Mast cell WT vs KO Figure s12b
+Mast1_Mast2_mast <- FindMarkers(Mast_cell_group3, group.by = "annotation_3", ident.1 = "Mast2", logfc.threshold = 0.25, min.pct = 0.1, test.use = "wilcox_limma")
+filtered_genes <- Mast1_Mast2_mast %>% 
+  filter(p_val_adj < 0.05)
+write.csv(Mast1_Mast2_mast, "Mast1_Mast2_mast_wilcox_limma.csv")
+
+VlnPlot(Mast_cell_group3, "Cpa3", group.by = "annotation_3", split.by = "annotation_3", pt.size = 0, cols = c("#F8766D", "#00BFC4")) + 
+  theme(axis.title.x = element_blank()) + NoLegend() # Figure 300 x 400
+Cpa3 <- FetchData(Mast_cell_group3, vars = c("Cpa3", "annotation_3"))
+write.csv(Cpa3, "Cpa3_expression_data_mouse_mast_cell.csv")
+
+VlnPlot(Mast_cell_group3, "Tpsab1", group.by = "annotation_3", split.by = "annotation_3", cols = c("#F8766D", "#00BFC4")) + 
+  theme(axis.title.x = element_blank()) + NoLegend() # Figure 300 x 400
+Tpsab1 <- FetchData(Mast_cell_group3, vars = c("Tpsab1", "annotation_3"))
+write.csv(Tpsab1, "Tpsab1_expression_data_mouse_mast_cell.csv")
+
+VlnPlot(Mast_cell_group3, "Tpsb2", group.by = "annotation_3", split.by = "annotation_3", cols = c("#F8766D", "#00BFC4")) + 
+  theme(axis.title.x = element_blank()) + NoLegend() # Figure 300 x 400
+Tpsb2 <- FetchData(Mast_cell_group3, vars = c("Tpsb2", "annotation_3"))
+write.csv(Tpsb2, "Tpsb2_expression_data_mouse_mast_cell.csv")
+
+VlnPlot(Mast_cell_group3, "Nfkb1", group.by = "annotation_3", split.by = "annotation_3", cols = c("#F8766D", "#00BFC4")) + 
+  theme(axis.title.x = element_blank()) + NoLegend() # Figure 300 x 400
+Nfkb1 <- FetchData(Mast_cell_group3, vars = c("Nfkb1", "annotation_3"))
+write.csv(Nfkb1, "Nfkb1_expression_data_mouse_mast_cell.csv")
+
+VlnPlot(Mast_cell_group3, "Il6", group.by = "annotation_3", split.by = "annotation_3", cols = c("#F8766D", "#00BFC4")) + 
+  theme(axis.title.x = element_blank()) + NoLegend() # Figure 300 x 400
+Il6 <- FetchData(Mast_cell_group3, vars = c("Il6", "annotation_3"))
+write.csv(Il6, "Il6_expression_data_mouse_mast_cell.csv")
+
+VlnPlot(Mast_cell_group3, "Ccl3", group.by = "annotation_3", split.by = "annotation_3", cols = c("#F8766D", "#00BFC4")) + 
+  theme(axis.title.x = element_blank()) + NoLegend() # Figure 300 x 400
+Ccl3 <- FetchData(Mast_cell_group3, vars = c("Ccl3", "annotation_3"))
+write.csv(Ccl3, "Ccl3_expression_data_mouse_mast_cell.csv")
+
+VlnPlot(Mast_cell_group3, "Cd44", group.by = "annotation_3", split.by = "annotation_3", cols = c("#F8766D", "#00BFC4")) + 
+  theme(axis.title.x = element_blank()) + NoLegend() # Figure 300 x 400
+Cd44 <- FetchData(Mast_cell_group3, vars = c("Cd44", "annotation_3"))
+write.csv(Cd44, "Cd44_expression_data_mouse_mast_cell.csv")
+
+VlnPlot(Mast_cell_group3, "Lgals3", group.by = "annotation_3", split.by = "annotation_3", cols = c("#F8766D", "#00BFC4")) + 
+  theme(axis.title.x = element_blank()) + NoLegend() # Figure 300 x 400
+Lgals3 <- FetchData(Mast_cell_group3, vars = c("Lgals3", "annotation_3"))
+write.csv(Lgals3, "Lgals3_expression_data_mouse_mast_cell.csv")
+
+VlnPlot(Mast_cell_group3, "Lgals9", group.by = "annotation_3", split.by = "annotation_3", cols = c("#F8766D", "#00BFC4")) + 
+  theme(axis.title.x = element_blank()) + NoLegend() # Figure 300 x 400
+Lgals9 <- FetchData(Mast_cell_group3, vars = c("Lgals9", "annotation_3"))
+write.csv(Lgals9, "Lgals9_expression_data_mouse_mast_cell.csv")
+
+VlnPlot(Mast_cell_group3, "Nfkbia", group.by = "annotation_3", split.by = "annotation_3", cols = c("#F8766D", "#00BFC4")) + 
+  theme(axis.title.x = element_blank()) + NoLegend() # Figure 300 x 400
+Nfkbia <- FetchData(Mast_cell_group3, vars = c("Nfkbia", "annotation_3"))
+write.csv(Nfkbia, "~/count/Source Data/Nfkbia_expression_data_mouse_mast_cell.csv")
+
+# --------------------------------- #
+# Figure S12 Human Mast cell data processing
+# --------------------------------- #
+
+# 230911 Human Mast cell (from Emont et al., 2022, Nature)
+human_immune <- readRDS("~/221229 Evan Rosen, Nature/human_immune.rds")
+setwd("~/group1/count")
+DimPlot(human_immune, label = T)
+VlnPlot(human_immune, "CPA3", pt.size = 0)
+human_mast <- subset(human_immune[,human_immune$cell_type == "hMast"])
+ElbowPlot(human_mast)
+run_preprocessing(human_mast, "human_mast.rds")
+human_mast <- RunHarmony(human_mast, group.by.vars = "technology", project.dim = T)
+human_mast <- RunUMAP(human_mast, dims = 1:12, reduction = "harmony")
+human_mast <- FindNeighbors(human_mast, dims = 1:12, reduction = "harmony")
+human_mast <- FindClusters(human_mast, resolution = 1.5)
+
+# Figure S12e
+DimPlot(human_mast, group.by = "bmi.range", cols = c("#619CFF", "#00BA38", "#F8766D"), pt.size = 1.5) + 
+  NoLegend() + NoAxes() + ggtitle("")
+
+# Mast1 and Mast2 subpopulation
+mast2_genes <- c("CMSS1","DOCK10","EHD4","MYO1D","LARS2","CDK8","GCH1","MAML2",
+                 "COBLL1","CHST11","FYN","CD44","CAMK2D","COBL","DOCK11","CD84",
+                 "ESYT2","CAMK1D","SPRED1","CDK17","PLCL2","PAPSS2","ETV6","VCL",
+                 "GPHN","RNF180","ST3GAL1","RAB8B","ELMO1","RUNX1","PTK2B","UBASH3B",
+                 "SYTL3","FMN1","PDE4D")
+
+DimPlot(human_mast, group.by = "RNA_snn_res.1.5", label = T)
+DotPlot(human_mast, features = mast2_genes, group.by = "RNA_snn_res.1.5") + coord_flip() # Mast2 marker genes
+human_mast[["Mast2_features"]] <- colSums(human_mast[["RNA"]][mast2_genes, ])
+
+# Subclustering: 0, 1, 4, 5, 6, 7 ==> hMast1 / 2, 3, 8, 9, 10 ==> hMast2
+Idents(human_mast) <- human_mast$RNA_snn_res.1.5
+new.cluster.ids <- c("hMast1", "hMast1", "hMast2", "hMast2", 
+                     "hMast1", "hMast1",  "hMast1", "hMast1",
+                     "hMast2", "hMast2", "hMast2")
+names(new.cluster.ids) <- levels(human_mast) 
+human_mast <- RenameIdents(human_mast, new.cluster.ids) 
+human_mast$annotation_3 <- human_mast@active.ident 
+human_mast$annotation_3 <- factor(human_mast$annotation_3, levels = c("hMast1", "hMast2"))
+human_mast@active.ident <- factor(human_mast@active.ident, levels = c("hMast1", "hMast2"))
+
+# Figure S12f
+DimPlot(human_mast, group.by = "annotation_3", cols = c("#9696ff", "#ff6464"), label = F, pt.size = 1.5) + 
+  NoLegend() + NoAxes() + ggtitle("") # Figure 400 x 400
+
+# Figure S12g
+Mast2_features <- FetchData(human_mast, vars = c("Mast2_features", "annotation_3"))
+write.csv(Mast2_features, "Mast2_features.csv")
+
+#Figure S12h
+DotPlot(human_mast, "Mast2_features", group.by = "bmi", scale = F, scale.min = 0, scale.max = 100) + coord_flip() + 
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank(), axis.text = element_blank()) + NoLegend()# 800 x 400
+plot_data <- FetchData(human_mast, vars = c("Mast2_features", "bmi"))
+bmi_group_summary <- plot_data %>%
+  group_by(bmi) %>%
+  summarize(mean_Mast2_features = mean(Mast2_features, na.rm = TRUE))
+
+# --------------------------------- #
+# AddModulScore (non-included in the figures)
+# --------------------------------- #
+
+human_mast <- AddModuleScore(object = human_mast, features = list(mast2_genes), name = "Mast2_Module")
+FeaturePlot(human_mast, "Mast2_Module1")
+DotPlot(human_mast, "Mast2_Module1", group.by = "bmi", scale = F)
+
+# --------------------------------- #
+# Monocle (non-included in the figures)
+# --------------------------------- #
+
+# 230919 Monocle
+Mast_cell_group3 <- readRDS("~/count/Mast_cell_group3.rds")
+### Building the necessary parts for a basic cds
+
+# part one, gene annotations
+gene_annotation <- as.data.frame(rownames(Mast_cell_group3@assays[["RNA"]]@counts), row.names = rownames(Mast_cell_group3@assays[["RNA"]]@counts))
+colnames(gene_annotation) <- "gene_short_name"
+
+# part two, cell information
+cell_metadata <- as.data.frame(Mast_cell_group3@assays[["RNA"]]@counts@Dimnames[[2]], row.names = Mast_cell_group3@assays[["RNA"]]@counts@Dimnames[[2]]) # 여기서 사용 안함
+cell_metadata <- as.data.frame(Mast_cell_group3@meta.data) 
+
+# part three, counts sparse matrix
+New_matrix <- Mast_cell_group3@assays[["RNA"]]@counts
+New_matrix <- New_matrix[rownames(Mast_cell_group3@assays[["RNA"]]@counts), ]
+expression_matrix <- New_matrix
+
+
+### Construct the basic cds object
+cds_from_seurat <- new_cell_data_set(expression_matrix,
+                                     cell_metadata = cell_metadata,
+                                     gene_metadata = gene_annotation)
+
+cds <- cds_from_seurat
+
+## Step 1: Normalize and pre-process the data
+cds <- preprocess_cds(cds, num_dim = 100)
+plot_pc_variance_explained(cds)
+
+## Step 2: Remove batch effects with cell alignment
+cds <- align_cds(cds) 
+
+## Step 3: Reduce the dimensions using UMAP
+cds <- reduce_dimension(cds)
+plot_cells(cds)
+plot_cells(cds, genes=c("Nfkb1"))
+
+## Step 4: Cluster the cells
+cds <- cluster_cells(cds, resolution=0.001)
+plot_cells(cds)
+
+## Step 5: Learn a graph
+cds <- learn_graph(cds)
+plot_cells(cds)
+
+## Step 6: Order cells
+cds <- order_cells(cds)
+plot_cells(cds, 
+           show_trajectory_graph = F,
+           color_cells_by = "pseudotime", 
+           cell_size = 2)
+plot_cells(cds,
+           color_cells_by = "pseudotime",
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE,
+           graph_label_size=1.5, 
+           cell_size = 2,
+           trajectory_graph_color = "black", 
+           trajectory_graph_segment_size = 2)
+plot_cells(cds,
+           color_cells_by = "annotation_3",
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE,
+           graph_label_size=1.5,
+           show_trajectory_graph = F,
+           cell_size = 2)  + NoLegend()
+plot_cells(cds,
+           color_cells_by = "genotype",
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE,
+           graph_label_size=1.5) + NoLegend()
+
+AFD_genes <- c("Nfkb1", "Cd44", "Lgals3")
+AFD_lineage_cds <- cds[rowData(cds)$gene_short_name %in% AFD_genes]
+AFD_lineage_cds <- order_cells(AFD_lineage_cds)
+plot_genes_in_pseudotime(AFD_lineage_cds,
+                         color_cells_by="annotation_3",
+                         cell_size = 1) + NoLegend()
+
+save_monocle_objects(cds=cds, directory_path='count', comment='This is my example cds.')
+cds <- load_monocle_objects(directory_path='my_cds_objects')
+
